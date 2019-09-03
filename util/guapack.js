@@ -2,7 +2,7 @@ const fs = require('fs') // 读写文件
 const path = require('path') // 处理路径
 const parser = require('@babel/parser') // ast parser
 const traverse = require('@babel/traverse').default // 从 ast 中收集依赖的相对路径
-const { transformFromAstSync } = require('@babel/core')
+const { transformFromAstSync } = require('@babel/core') // 根据 ast sourceCode 转换成 es5
 
 // IIFE 立即调用的函数表达式创建出来的一个闭包
 const gidGenerator = (() => {
@@ -35,6 +35,12 @@ const astFromCode = code => {
     return ast
 }
 
+const astFromEntry = entry => {
+    let t = readFile(entry)
+    let ast = astFromCode(t)
+    return ast
+}
+
 const codeConvert = code => {
     let ast = astFromCode(code)
     let r = transformFromAstSync(ast, code, {
@@ -42,12 +48,6 @@ const codeConvert = code => {
         presets: ['@babel/preset-env']
     }).code
     return r
-}
-
-const astFromEntry = entry => {
-    let t = readFile(entry)
-    let ast = astFromCode(t)
-    return ast
 }
 
 const collectDependencies = entry => {
@@ -89,24 +89,104 @@ const graphFromEntry = entry => {
     return o
 }
 
-const bigPack = (entry, distPath) => {
-    let txt = readFile(entry)
-    let ast = astFromCode(txt)
+const moduleCodeTemplate = (graph, mapping) => {
+    let m = JSON.stringify(mapping)
+    let s = `
+        ${graph.id}: [
+            function(require, module, exports) {
+                ${graph.code}
+            },
+            ${m}
+        ],
+    `
+    return s
+}
 
+const moduleCodeFromGraph = (graph) => {
+    let code = ''
+    Object.values(graph).forEach(g => {
+        let ds = g.dependencies
+        console.log(ds, '::: ds  is here')
+        let o = {}
+        // 建立一个依赖相对路径映射依赖 graph id 的对象，
+        // 后面运行代码时可以根据代码里写的相对路径来拿到 id 跳转对应的 graph
+        Object.entries(ds).forEach(([relativePath, absPath]) => {
+            o[relativePath] = graph[absPath].id
+        })
+        code += moduleCodeTemplate(g, o)
+    })
+    return `{${code}}`
+}
+
+const codeTemplate = (modules) => {
+    let s = `
+        (function (modules) {
+            function require(id) {
+                const [fn, mapping] = modules[id]
+    
+                function localRequire(name) {
+                    let id = mapping[name]
+                    let r = require(id)
+                    return r
+                }
+    
+                const localModule = {
+                    exports: {},
+                }
+                fn(localRequire, localModule, localModule.exports)
+    
+                let result = localModule.exports
+                return result
+            }
+            require(1)
+        })(${modules})
+    `
+    return s
+}
+
+//递归创建目录 同步方法
+const mkDirSync = (dirName) => {
+    if (fs.existsSync(dirName)) {
+        return true
+    } else {
+        let dName = path.dirname(dirName)
+        if (mkDirSync(dName)) {
+            fs.mkdirSync(dirName)
+            return true
+        }
+    }
+}
+
+const saveCode = (code, distPath) => {
+    let dirName = path.dirname(distPath)
+    let notExist = fs.existsSync(dirName) === false
+    if (notExist) {
+        mkDirSync(dirName)
+    }
+    fs.writeFileSync(distPath, code)
+}
+
+const bigPack = (entry, distPath) => {
     let graph = graphFromEntry(entry)
     console.log(graph, '::: graph  is here')
-
-    
-
+    let moduleCode = moduleCodeFromGraph(graph)
+    console.log(moduleCode, '::: moduleCode  is here')
+    let code = codeTemplate(moduleCode)
+    console.log(code, '::: code  is here')
+    saveCode(code, distPath)
 }
 
 /*
 依赖的版本详见 package.json
 1、获取树状依赖对象
-    根据入口绝对路径拿到文件 txt, 读取文件: fs.readFileSync
-    根据读到的 txt code 生成 ast, 生成 ast: babel/parser
-    根据 entry, ast 来收集所有的依赖, 获取所有依赖的的相对路径: (babel/traverse).default
-    获得一个树状对象后，再根据自己的依赖去递归遍历依赖的树状依赖对象
+    根据入口绝对路径拿到文件 txt, 读取文件: fs.readFileSync;
+    根据读到的 txt code 生成 ast, 生成 ast: babel/parser;
+    根据 entry, ast 来收集所有的依赖, 获取所有依赖的的相对路径: (babel/traverse).default;
+    树状对象由 id, dependencies, content, code 组成;
+    获得一个树状对象后，再根据自己的依赖去递归遍历依赖的树状依赖对象;
+
+2、根据树状依赖对象拼接 module template 代码
+    遍历每个树状依赖对象的
 
 * */
 module.exports = bigPack
